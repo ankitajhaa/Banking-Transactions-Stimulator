@@ -19,7 +19,7 @@ public class Main {
         service.addAccount(acc1);
         service.addAccount(acc2);
 
-        Thread fraudThread = new Thread(new FraudDetector());
+        Thread fraudThread = new Thread(new FraudDetector(service.getTransactionLog()));
         fraudThread.setDaemon(true);
         fraudThread.setName("FraudDetector");
         fraudThread.start();
@@ -41,13 +41,6 @@ public class Main {
             System.out.println(Thread.currentThread().getName()
                     + " | [Runnable] Balance check ACC002: ₹" + acc2.getBalance()));
 
-        // ── Section 2: Deadlock scenario ────────────────────────
-        // Without ordered locking this would deadlock:
-        // Thread A: locks ACC001, waits for ACC002
-        // Thread B: locks ACC002, waits for ACC001  ← circular wait = deadlock
-        //
-        // Our fix: always lock by accountId alphabetical order
-        // Both threads lock ACC001 first → no circular wait → safe
         System.out.println("\n═══ Deadlock Prevention Test ═══");
         System.out.println("Submitting opposite-direction transfers simultaneously...\n");
 
@@ -56,7 +49,23 @@ public class Main {
         Future<Transaction> transfer3 = executor.submit(
                 new TransferTask(service, "ACC002", "ACC001", 500)); // ACC002 → ACC001 (opposite!)
 
-        // ── Section 3: invokeAll — batch async execution ────────
+        System.out.println("\n═══ Fraud Detection Test ═══\n");
+
+        // Trigger Rule 1 — large transaction
+        Future<Transaction> largeTxn = executor.submit(
+                new WithdrawTask(service, "ACC001", 15000));
+
+        // Trigger Rule 2 — rapid withdrawals (5 quick withdrawals)
+        List<Future<Transaction>> rapidWithdrawals = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            rapidWithdrawals.add(executor.submit(
+                    new WithdrawTask(service, "ACC001", 100)));
+        }
+
+        // Small pause so fraud detector scan picks up rapid withdrawals
+        Thread.sleep(1000);
+
+        // ── Section 4: invokeAll — batch async execution ────────
         System.out.println("\n═══ Stress test: 10 concurrent tasks ═══\n");
         List<Callable<Transaction>> stressTasks = new ArrayList<>();
         for (int i = 1; i <= 5; i++) {
@@ -67,7 +76,7 @@ public class Main {
         List<Future<Transaction>> stressFutures =
                 executor.invokeAll(stressTasks, 10, TimeUnit.SECONDS);
 
-        // ── Section 4: Collect results with full exception handling
+        // ── Section 5: Collect results with full exception handling
         System.out.println("\n═══ Results ═══\n");
         printResult("deposit1",  deposit1);
         printResult("withdraw1", withdraw1);
@@ -78,40 +87,47 @@ public class Main {
         printResult("transfer2 (ACC001→ACC002)", transfer2);
         printResult("transfer3 (ACC002→ACC001)", transfer3);
 
+        System.out.println("\n── Fraud test results ──");
+        printResult("large txn ₹15000", largeTxn);
+        for (Future<Transaction> f : rapidWithdrawals) {
+            printResult("rapid withdrawal", f);
+        }
+
         System.out.println("\n── Stress test results ──");
         for (Future<Transaction> f : stressFutures) {
             printResult("stress", f);
         }
 
         // ── Graceful shutdown ────────────────────────────────────
+        System.out.println("\n═══ Initiating Graceful Shutdown ═══");
         executor.shutdown();
-        boolean finished = executor.awaitTermination(10, TimeUnit.SECONDS);
-        System.out.println("\n" + (finished ? "✓" : "✗") + " Executor shut down cleanly");
+
+        if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
+            System.out.println("[WARN] Executor did not finish in time — forcing shutdown");
+            List<Runnable> pending = executor.shutdownNow();
+            System.out.println("[WARN] " + pending.size() + " tasks were pending at shutdown");
+        } else {
+            System.out.println("✓ All tasks completed — executor shut down cleanly");
+        }
+
+        System.out.println("✓ FraudDetector daemon stopped (JVM exit)");
 
         System.out.println("\n═══ Final Balances ═══");
         System.out.println("ACC001: ₹" + acc1.getBalance());
         System.out.println("ACC002: ₹" + acc2.getBalance());
     }
 
-    // ── Helper: handles all Future outcomes cleanly ──────────
     private static void printResult(String label, Future<Transaction> future) {
         try {
             Transaction t = future.get(5, TimeUnit.SECONDS);
             System.out.println("[" + label + "] " + t);
-
         } catch (TimeoutException e) {
-            // future.get() waited 5s but task still not done
             System.out.println("[" + label + "] FUTURE TIMEOUT — task took too long");
-            future.cancel(true); // interrupt the task
-
+            future.cancel(true);
         } catch (CancellationException e) {
-            // task was cancelled (e.g. by invokeAll timeout)
             System.out.println("[" + label + "] CANCELLED");
-
         } catch (ExecutionException e) {
-            // task threw an exception internally
             System.out.println("[" + label + "] EXECUTION ERROR: " + e.getCause().getMessage());
-
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             System.out.println("[" + label + "] INTERRUPTED while waiting for result");
