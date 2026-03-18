@@ -22,7 +22,13 @@ public class TransferTask implements Callable<Transaction> {
     @Override
     public Transaction call() {
         System.out.println(Thread.currentThread().getName()
-                + " | Transferring ₹" + amount + " from " + fromId + " → " + toId);
+                + " | Transferring ₹" + amount 
+                + " from " + fromId + " → " + toId
+                + " | Lock order: "
+                + (fromId.compareTo(toId) < 0
+                    ? fromId + " → " + toId
+                    : toId   + " → " + fromId)
+                + " (deadlock-safe)");
         return service.transfer(fromId, toId, amount);
     }
 }
